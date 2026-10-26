@@ -38,19 +38,44 @@ if (!MONGO_URI) {
 const maskedUri = (MONGO_URI || '').replace(/:\/\/([^:]+):([^@]+)@/, '://$1:****@');
 console.log(`🔌 [MongoDB] Connecting to: ${maskedUri || 'NOT CONFIGURED'}`);
 
-mongoose
-  .connect(MONGO_URI, {
-    serverSelectionTimeoutMS: 10000,
-  })
-  .then(() => {
-    const dbName = mongoose.connection.db?.databaseName;
-    const host = mongoose.connection.host;
-    const bucket = process.env.GRIDFS_BUCKET_NAME || 'uploads';
-    console.log(`✅ [MongoDB Atlas Connected] Host: ${host} | Database: "${dbName}" | GridFS Bucket: "${bucket}"`);
-  })
-  .catch((err) => {
-    console.error('❌ [MongoDB Connection Error]:', err.message);
-  });
+let isConnecting = false;
+let retryTimeout = null;
+
+const connectWithRetry = () => {
+  if (!MONGO_URI) return;
+  if (mongoose.connection.readyState === 1 || isConnecting) return;
+
+  isConnecting = true;
+  console.log('🔄 [MongoDB] Connecting to MongoDB Atlas...');
+
+  mongoose
+    .connect(MONGO_URI, {
+      serverSelectionTimeoutMS: 10000,
+    })
+    .then(() => {
+      isConnecting = false;
+      const dbName = mongoose.connection.db?.databaseName;
+      const host = mongoose.connection.host;
+      const bucket = process.env.GRIDFS_BUCKET_NAME || 'uploads';
+      console.log(`✅ [MongoDB Atlas Connected] Host: ${host} | Database: "${dbName}" | GridFS Bucket: "${bucket}"`);
+    })
+    .catch((err) => {
+      isConnecting = false;
+      console.error('❌ [MongoDB Connection Error]:', err.message);
+      console.log('⏳ [MongoDB] Retrying connection in 10 seconds (ensure 0.0.0.0/0 is whitelisted in Atlas Network Access)...');
+      if (retryTimeout) clearTimeout(retryTimeout);
+      retryTimeout = setTimeout(connectWithRetry, 10000);
+    });
+};
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('⚠️ [MongoDB Warning]: Lost connection to MongoDB Atlas. Attempting to reconnect...');
+  if (retryTimeout) clearTimeout(retryTimeout);
+  retryTimeout = setTimeout(connectWithRetry, 5000);
+});
+
+// Initial connection
+connectWithRetry();
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
